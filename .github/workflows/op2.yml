@@ -1,0 +1,122 @@
+name: OpenWrt
+
+on:
+  push:
+    branches: 
+      - master
+  workflow_dispatch:
+  watch:
+    types: started
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    if: github.event.repository.owner.id == github.event.sender.id
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@master
+
+      - name: Initialization environment
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo -E apt-get -yqq update
+          sudo -E apt-get -yqq install build-essential asciidoc binutils bzip2 lib32gcc-s1 gawk gettext git libncurses5-dev libz-dev patch python3 unzip zlib1g-dev libc6-dev-i386 subversion flex uglifyjs git-core gcc-multilib p7zip p7zip-full msmtp libssl-dev texinfo libglib2.0-dev xmlto qemu-utils upx libelf-dev autoconf automake libtool autopoint device-tree-compiler g++-multilib
+          sudo -E apt-get -y autoremove --purge
+          sudo -E apt-get clean
+          
+      - name: Download lede
+        run: |
+          git clone https://github.com/coolsnowwolf/lede
+          cp .config ./lede/.config
+          mv ./lede/* ./
+          
+      - name: Install Helloword
+        run: |
+          echo "src-git helloworld https://github.com/fw876/helloworld" >> ./feeds.conf.default 
+          
+      - name: Install OpenClash
+        run: |
+          mkdir package/luci-app-openclash
+          cd package/luci-app-openclash
+          git init
+          git remote add -f origin https://github.com/vernesong/OpenClash.git
+          git config core.sparsecheckout true
+          echo "luci-app-openclash" >> .git/info/sparse-checkout
+          git pull --depth 1 origin master
+          git branch --set-upstream-to=origin/master master
+          pushd luci-app-openclash/tools/po2lmo
+          make && sudo make install
+          popd
+          
+      - name: Update feeds
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          
+      - name: Costom configure file
+        run: |
+          make defconfig
+          
+      - name: Download package source code
+        run: |
+          make download -j8
+          find dl -size -1024c -exec ls -l {} \;
+          find dl -size -1024c -exec rm -f {} \;
+          
+      - name: Compile firmware
+        run: |
+          echo -e "$(nproc) thread build."
+          make -j$(nproc) V=s
+          
+      - name: Get firmware files
+        run: |
+          # 获取固件文件名和版本信息
+          echo "FIRMWARE_PATH=$(find bin/targets -name '*.bin' -o -name '*.img' -o -name '*.gz' | head -5)" >> $GITHUB_ENV
+          echo "BUILD_TIME=$(date '+%Y%m%d-%H%M%S')" >> $GITHUB_ENV
+          echo "COMMIT_SHORT=$(git rev-parse --short HEAD)" >> $GITHUB_ENV
+          
+      - name: Upload artifact
+        uses: actions/upload-artifact@master
+        with:
+          name: OpenWrt_firmware_${{ env.BUILD_TIME }}
+          path: bin/targets/
+          
+      - name: Create Release and Upload firmware
+        if: success()
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: build-${{ env.BUILD_TIME }}-${{ env.COMMIT_SHORT }}
+          name: OpenWrt Build ${{ env.BUILD_TIME }}
+          body: |
+            OpenWrt固件自动构建
+            
+            ### 构建信息
+            - 构建时间: ${{ env.BUILD_TIME }}
+            - 提交版本: ${{ env.COMMIT_SHORT }}
+            - 触发器: ${{ github.event_name }}
+            
+            ### 固件说明
+            此固件为自动构建版本，包含以下插件：
+            - HelloWorld
+            - OpenClash
+            
+            ### 使用说明
+            1. 下载对应设备的固件文件
+            2. 通过Web界面或命令行刷入
+            3. 首次使用请恢复出厂设置
+            
+            ### 注意事项
+            - 刷机前请备份重要数据
+            - 不同设备请选择对应的固件文件
+          draft: false
+          prerelease: true
+          files: |
+            bin/targets/**/*.bin
+            bin/targets/**/*.img
+            bin/targets/**/*.gz
+            bin/targets/**/*.tar
+            bin/targets/**/sha256sums
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
